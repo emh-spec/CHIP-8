@@ -232,5 +232,218 @@ pub const Chip8 = struct {
     /// var opcode = ch.fetch();
     /// try ch.execute(opcode);
     /// ```
-    pub fn execute(self: *Chip8, opcode: u16) Chip8Error!void {}
+    pub fn execute(self: *Chip8, opcode: u16) Chip8Error!void {
+        // The first nibble. Store the instruction types.
+        const op = @as(u4, @truncate((opcode & 0xF000) >> 12));
+        // The second nibble. Vx register index.
+        const x = @as(u4, @truncate((opcode & 0x0F00) >> 8));
+        // The third nibble. Vy register index.
+        const y = @as(u4, @truncate((opcode & 0x00F0) >> 4));
+        // The fourth nibble. A 4-bit number.
+        const n = @as(u4, @truncate(opcode));
+
+        // The second byte (third and fourth nibbles). An 8-bit immediate number.
+        const nn = @as(u8, @truncate(opcode));
+        // The second, third and fourth nibbles. A 12-bit immediate memory address.
+        const nnn = @as(u12, @truncate(opcode));
+
+        switch (op) {
+            // 0x0 - CLS / RET: dispatch on nn to differentiate 00E0 and 00EE.
+            0x0 => switch (nn) {
+                // 00E0 - CLS: clear the display buffer.
+                0xE0 => self.display = [_]bool{false} ** DISPLAY_SIZE,
+                // 00EE - RET: pop return address from stack and resume execution.
+                0xEE => {
+                    if (self.sp == 0) return error.StackUnderflow;
+                    self.sp -= 1;
+                    self.pc = self.stack[self.sp];
+                },
+                else => {},
+            },
+
+            // 1nnn - JP addr: unconditional jump to address nnn.
+            0x1 => self.pc = @intCast(nnn),
+
+            // 2nnn - CALL addr: push current pc onto stack, jump to nnn.
+            0x2 => {
+                if (self.sp >= 16) return error.StackOverflow;
+                self.stack[self.sp] = self.pc;
+                self.sp += 1;
+                self.pc = @intCast(nnn);
+            },
+
+            // 3Xnn - SE Vx, byte: skip next instruction if Vx == nn.
+            0x3 => if (self.v_regs[x] == nn) {
+                self.pc += 2;
+            },
+
+            // 4Xnn - SNE Vx, byte: skip next instruction if Vx != nn.
+            0x4 => if (self.v_regs[x] != nn) {
+                self.pc += 2;
+            },
+
+            // 5XY0 - SE Vx, Vy: skip next instruction if Vx == Vy.
+            0x5 => if (self.v_regs[x] == self.v_regs[y]) {
+                self.pc += 2;
+            },
+
+            // 9XY0 - SNE Vx, Vy: skip next instruction if Vx != Vy.
+            0x9 => if (self.v_regs[x] != self.v_regs[y]) {
+                self.pc += 2;
+            },
+
+            // 6Xnn - LD Vx, byte: set Vx = nn.
+            0x6 => self.v_regs[x] = nn,
+
+            // 7Xnn - ADD Vx, byte: set Vx = Vx + nn, no carry flag.
+            0x7 => self.v_regs[x] +%= nn,
+
+            // Annn - LD I, addr: set index register I = nnn.
+            0xA => self.i_reg = @intCast(nnn),
+
+            // Bnnn - JP V0, addr: jump to address nnn + V0.
+            0xB => self.pc = (@as(u16, nnn) +% self.v_regs[0]) & 0x0FFF,
+
+            // DXYn - DRW Vx, Vy, n: draw N-byte sprite at (Vx, Vy); VF = collision.
+            0xD => {
+                const x_pos = self.v_regs[x] & @as(u8, DIS_W - 1);
+                const y_pos = self.v_regs[y] & @as(u8, DIS_H - 1);
+                var collision = false;
+
+                for (0..n) |row| {
+                    const sprite_byte = self.memory[self.i_reg + @as(u16, @intCast(row))];
+                    for (0..8) |b| {
+                        if (sprite_byte & (@as(u8, 0x80) >> @intCast(b)) != 0) {
+                            const screen_x = x_pos + b;
+                            const screen_y = y_pos + row;
+                            if (screen_x < DIS_W and screen_y < DIS_H) {
+                                const index = screen_x + (screen_y * DIS_W);
+                                if (self.display[index]) collision = true;
+                                self.display[index] ^= true;
+                            }
+                        }
+                    }
+                }
+                self.v_regs[0xF] = if (collision) 1 else 0;
+            },
+
+            // 8XYn - arithmetic and bitwise ops on Vx and Vy; dispatch on n.
+            0x8 => switch (n) {
+                // 8XY0 - LD Vx, Vy: set Vx = Vy.
+                0x0 => self.v_regs[x] = self.v_regs[y],
+                // 8XY1 - OR Vx, Vy: set Vx = Vx | Vy.
+                0x1 => self.v_regs[x] |= self.v_regs[y],
+                // 8XY2 - AND Vx, Vy: set Vx = Vx & Vy.
+                0x2 => self.v_regs[x] &= self.v_regs[y],
+                // 8XY3 - XOR Vx, Vy: set Vx = Vx ^ Vy.
+                0x3 => self.v_regs[x] ^= self.v_regs[y],
+                // 8XY4 - ADD Vx, Vy: set Vx = Vx + Vy, VF = carry.
+                0x4 => {
+                    const val = @addWithOverflow(self.v_regs[x], self.v_regs[y]);
+                    self.v_regs[x] = val[0];
+                    self.v_regs[0xF] = @intFromBool(val[1] != 0);
+                },
+                // 8XY5 - SUB Vx, Vy: set Vx = Vx - Vy, VF = NOT borrow.
+                0x5 => {
+                    const val = @subWithOverflow(self.v_regs[x], self.v_regs[y]);
+                    self.v_regs[x] = val[0];
+                    self.v_regs[0xF] = if (val[1] != 0) 0 else 1;
+                },
+                // 8XY6 - SHR Vx: set Vx >>= 1, VF = shifted-out bit.
+                0x6 => {
+                    const shifted_out_bit = self.v_regs[x] & 0x1;
+                    self.v_regs[x] >>= 1;
+                    self.v_regs[0xF] = shifted_out_bit;
+                },
+                // 8XY7 - SUBN Vx, Vy: set Vx = Vy - Vx, VF = NOT borrow.
+                0x7 => {
+                    const val = @subWithOverflow(self.v_regs[y], self.v_regs[x]);
+                    self.v_regs[x] = val[0];
+                    self.v_regs[0xF] = if (val[1] != 0) 0 else 1;
+                },
+                // 8XYE - SHL Vx: set Vx <<= 1, VF = shifted-out bit.
+                0xE => {
+                    const shifted_out_bit = (self.v_regs[x] & 0x80) >> 7;
+                    self.v_regs[x] <<= 1;
+                    self.v_regs[0xF] = shifted_out_bit;
+                },
+                else => {},
+            },
+
+            // CXnn - RND Vx, byte: set Vx = random byte & nn.
+            0xC => self.v_regs[x] = prng.random().int(u8) & nn,
+
+            // EX9E and EXA1 skip based on key state in Vx; dispatch on nn.
+            0xE => switch (nn) {
+                // EX9E - SKP Vx: skip next instruction if key Vx is pressed.
+                0x9E => {
+                    const key = self.v_regs[x];
+                    if (key < 16 and self.keypad[key]) self.pc += 2;
+                },
+                // EXA1 - SKNP Vx: skip next instruction if key Vx is not pressed.
+                0xA1 => {
+                    const key = self.v_regs[x];
+                    if (key < 16 and !self.keypad[key]) self.pc += 2;
+                },
+                else => {},
+            },
+
+            // FXnn - timer, memory, I/O, and misc ops; dispatch on nn.
+            0xF => switch (nn) {
+                // FX07 - LD Vx, DT: set Vx = delay timer.
+                0x07 => self.v_regs[x] = self.delay_timer,
+                // FX15 - LD DT, Vx: set delay timer = Vx.
+                0x15 => self.delay_timer = self.v_regs[x],
+                // FX18 - LD ST, Vx: set sound timer = Vx.
+                0x18 => self.sound_timer = self.v_regs[x],
+                // FX1E - ADD I, Vx: set I = I + Vx.
+                0x1E => self.i_reg +%= @intCast(self.v_regs[x]),
+                // FX29 - LD F, Vx: set I = address of font sprite for digit Vx & 0xF.
+                0x29 => self.i_reg = @intCast((self.v_regs[x] & 0xF) * 0x5),
+                // FX55 - LD [I], Vx: store V0..Vx into memory starting at I.
+                0x55 => {
+                    for (0..x + 1) |i| self.memory[self.i_reg + i] = self.v_regs[i];
+                },
+                // FX65 - LD Vx, [I]: read V0..Vx from memory starting at I.
+                0x65 => {
+                    for (0..x + 1) |i| self.v_regs[i] = self.memory[self.i_reg + i];
+                },
+                // FX33 - LD B, Vx: store BCD digits of Vx at I, I+1, I+2 via double-dabble.
+                0x33 => {
+                    var val = self.v_regs[x];
+                    var hundreds: u8 = 0;
+                    var tens: u8 = 0;
+                    var ones: u8 = 0;
+
+                    for (0..8) |_| {
+                        if (hundreds >= 5) hundreds += 3;
+                        if (tens >= 5) tens += 3;
+                        if (ones >= 5) ones += 3;
+
+                        const bit = (val & 0x80) >> 7;
+                        val <<= 1;
+
+                        ones = (ones << 1) | bit;
+                        tens = (tens << 1) | (ones >> 4);
+                        hundreds = (hundreds << 1) | (tens >> 4);
+
+                        ones &= 0x0F;
+                        tens &= 0x0F;
+                        hundreds &= 0x0F;
+                    }
+
+                    self.memory[self.i_reg] = hundreds;
+                    self.memory[self.i_reg + 1] = tens;
+                    self.memory[self.i_reg + 2] = ones;
+                },
+                // FX0A - LD Vx, K: halt execution until a key is pressed; store key in Vx.
+                0x0A => {
+                    self.waiting_for_key = true;
+                    self.waiting_reg = @intCast(x);
+                },
+                else => {},
+            },
+            else => return error.InvalidOpcode,
+        }
+    }
 };
