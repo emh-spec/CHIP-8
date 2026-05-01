@@ -18,12 +18,15 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .strip = true,
+            .link_libc = true,
 
             .imports = &.{
                 .{ .name = "chip8", .module = mod },
             },
         }),
     });
+
+    exe.root_module.linkSystemLibrary("SDL2", .{});
 
     b.installArtifact(exe);
 
