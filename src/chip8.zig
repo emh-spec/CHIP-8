@@ -5,20 +5,11 @@ const DIS_H = @import("root.zig").DISPLAY_HEIGHT;
 
 /// All the error type that can happen in CHIP-8.
 pub const Chip8Error = error{
-    /// The `opcode` is either unknown or invalid.
-    InvalidOpcode,
-
     /// If the stack is empty and some operations tries to `pop` it.
     StackUnderflow,
 
     /// If the stack pointer exceeds the stack bound.
     StackOverflow,
-
-    /// When the ROM exceeds available memory.
-    MemoryOverflow,
-
-    /// The rom buffer is empty.
-    EmptyBuffer,
 };
 
 /// Built-in font set of the emulator, with sprite data representing
@@ -93,6 +84,9 @@ pub const Chip8 = struct {
     /// 64 x 32 pixels monochrome display buffer.
     display: [DISPLAY_SIZE]bool,
 
+    /// Signals the platform layer that the display buffer has changed and needs to be redrawn.
+    draw_flag: bool,
+
     /// State of the 16-key hexadecimal keypad (0-F).
     keypad: [16]bool,
 
@@ -123,6 +117,7 @@ pub const Chip8 = struct {
             .delay_timer = 0,
             .sound_timer = 0,
             .display = [_]bool{false} ** DISPLAY_SIZE,
+            .draw_flag = false,
             .keypad = [_]bool{false} ** 16,
             .waiting_for_key = false,
             .waiting_reg = 0,
@@ -136,26 +131,26 @@ pub const Chip8 = struct {
 
     /// Loads `src` ROM data into memory address 0x200.
     ///
+    ///
     /// # Errors
     ///
-    /// Returns `MemoryOverflow` if the `src` len is greater than available
-    /// memory (`4096 - 512 = 3584`).
+    /// Returns `std.Io.Dir.ReadFileAllocError` based on the `src` file read failure.
     ///
     /// # Examples
     ///
     /// ```zig
-    /// var ch = Chip8.init();
-    ///
-    /// const rom = try std.fs.cwd().readFileAlloc(allocator, "roms/pong.ch8", .unlimited);
-    /// defer allocator.free(rom);
-    /// try ch.load_rom(rom);
+    /// pub fn main(init: std.process.Init) !void {
+    ///     var ch = Chip8.init();
+    ///     try ch.load_rom("rom/PONG", init.arena.allocator(), init.io);
+    /// }
     /// ```
-    pub fn load_rom(self: *Chip8, src: []const u8) Chip8Error!void {
-        const start = @as(usize, PROGRAM_STR_ADD);
+    pub fn load_rom(self: *Chip8, src: []const u8, allocator: std.mem.Allocator, io: std.Io) std.Io.Dir.ReadFileAllocError!void {
+        const limit = MEM_SIZE - PROGRAM_STR_ADD;
 
-        if ((MEM_SIZE - start) < src.len) return error.MemoryOverflow;
+        const rom = try std.Io.Dir.cwd().readFileAlloc(io, src, allocator, std.Io.Limit.limited(limit));
+        defer allocator.free(rom);
 
-        @memcpy(self.memory[start .. start + src.len], src);
+        @memcpy(self.memory[PROGRAM_STR_ADD .. PROGRAM_STR_ADD + rom.len], rom);
     }
 
     /// Decrements the delay and sound timers by 1.
@@ -171,7 +166,7 @@ pub const Chip8 = struct {
     ///
     /// # Errors
     ///
-    /// Returns the same errors as `execute()`: `InvalidOpcode`, `StackOverflow`, `StackUnderflow`.
+    /// Returns the same errors as `execute()`: `StackOverflow`, `StackUnderflow`.
     ///
     /// # Examples
     ///
@@ -222,8 +217,6 @@ pub const Chip8 = struct {
     ///
     /// Returns `StackOverflow` when the stack pointer (`sp`) is greater or equal to `16`.
     ///
-    /// Returns `InvalidOpcode` when the decoded `opcode` is unknown or invalid.
-    ///
     /// # Examples
     ///
     /// ```zig
@@ -233,7 +226,7 @@ pub const Chip8 = struct {
     /// try ch.execute(opcode);
     /// ```
     pub fn execute(self: *Chip8, opcode: u16) Chip8Error!void {
-        // The first nibble. Store the instruction types.
+        // The first nibble. Stores the instruction category.
         const op = @as(u4, @truncate((opcode & 0xF000) >> 12));
         // The second nibble. Vx register index.
         const x = @as(u4, @truncate((opcode & 0x0F00) >> 8));
@@ -325,6 +318,7 @@ pub const Chip8 = struct {
                     }
                 }
                 self.v_regs[0xF] = if (collision) 1 else 0;
+                if (n > 0) self.draw_flag = true;
             },
 
             // 8XYn - arithmetic and bitwise ops on Vx and Vy; dispatch on n.
@@ -443,7 +437,6 @@ pub const Chip8 = struct {
                 },
                 else => {},
             },
-            else => return error.InvalidOpcode,
         }
     }
 };
