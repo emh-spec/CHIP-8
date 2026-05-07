@@ -10,6 +10,9 @@ pub const Chip8Error = error{
 
     /// If the stack pointer exceeds the stack bound.
     StackOverflow,
+
+    /// If required RAM size exceeds available memory.
+    OutOfMemory,
 };
 
 /// Built-in font set of the emulator, with sprite data representing
@@ -134,23 +137,21 @@ pub const Chip8 = struct {
     ///
     /// # Errors
     ///
-    /// Returns `std.Io.Dir.ReadFileAllocError` based on the `src` file read failure.
+    /// Returns `OutOfMemory` if the `src` len is grater then limited memory.
     ///
     /// # Examples
     ///
     /// ```zig
     /// pub fn main(init: std.process.Init) !void {
     ///     var ch = Chip8.init();
-    ///     try ch.load_rom("rom/PONG", init.arena.allocator(), init.io);
+    ///     const rom = @embedFile("rom/PONG");
+    ///     try ch.load_rom(rom);
     /// }
     /// ```
-    pub fn load_rom(self: *Chip8, src: []const u8, allocator: std.mem.Allocator, io: std.Io) std.Io.Dir.ReadFileAllocError!void {
+    pub fn load_rom(self: *Chip8, src: []const u8) Chip8Error!void {
         const limit = MEM_SIZE - PROGRAM_STR_ADD;
-
-        const rom = try std.Io.Dir.cwd().readFileAlloc(io, src, allocator, std.Io.Limit.limited(limit));
-        defer allocator.free(rom);
-
-        @memcpy(self.memory[PROGRAM_STR_ADD .. PROGRAM_STR_ADD + rom.len], rom);
+        if (src.len > limit) return error.OutOfMemory;
+        @memcpy(self.memory[PROGRAM_STR_ADD .. PROGRAM_STR_ADD + src.len], src);
     }
 
     /// Decrements the delay and sound timers by 1.

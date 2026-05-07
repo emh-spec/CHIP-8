@@ -39,7 +39,10 @@ pub fn main(init: std.process.Init) !void {
     var input = Input.init();
 
     var ch = Chip8.init();
-    try ch.load_rom(path, init.arena.allocator(), init.io);
+
+    const rom = try std.Io.Dir.cwd().readFileAlloc(init.io, path, init.arena.allocator(), std.Io.Limit.unlimited);
+
+    try ch.load_rom(rom);
 
     // Target CPU clock speed in cycles per second.
     const cpu_hz: usize = 700;
