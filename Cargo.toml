@@ -1,0 +1,11 @@
+[package]
+name = "chip8_emulator"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "chip8"
+src = "src/lib.rs"
+
+[profile.release]
+strip = true
